@@ -1,0 +1,8 @@
+# dsh-host-tool bundle patch
+#
+# 只插一行：把本包作为 cordis 插件挂上，它 inject 了 `tools` 服务，
+# 在 apply() 里注册 host_shell / host_adb 两个工具。
+- insert:
+    - id: dsh-host-tool
+      name: 'dsh-host-tool'
+      inject: [tools]

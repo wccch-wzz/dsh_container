@@ -36,7 +36,7 @@ do_start() {
   echo "$_pid" > "$PID_FILE"
 
   _i=0
-  while [ "$_i" -lt 40 ]; do
+  while [ "$_i" -lt 20 ]; do
     if kill -0 "$_pid" 2>/dev/null && guest_exec "true" 5 >/dev/null 2>&1; then
       log "容器已启动 (pid $_pid, agent 就绪)"
       return 0
@@ -104,7 +104,29 @@ do_enter() {
 
 case "$1" in
   install) sh "$DIR/install.sh" "${2:-}" ;;
-  start)  do_start ;;
+  start)
+    # --detach：立即返回，真正的启动在后台跑。否则 WebUI 的同步 exec 会被卡住，
+    # 页面上所有查询排队，看起来就像“卡死 + 一直查询中”。
+    if [ "${2:-}" = "--detach" ]; then
+      _dt="$LOG_DIR/container-start.log"
+      _lk="$STATE_DIR/.boot.lock"
+      mkdir -p "$LOG_DIR" "$STATE_DIR" 2>/dev/null
+      if ! mkdir "$_lk" 2>/dev/null; then
+        _t=$(cat "$_lk/ts" 2>/dev/null || echo 0)
+        _age=$(( $(date +%s) - _t ))
+        if [ "$_t" != 0 ] && [ "$_age" -lt 300 ]; then
+          echo "已有启动任务在进行中（${_age}s 前开始），忽略重复请求"
+          exit 0
+        fi
+        rm -rf "$_lk"
+        mkdir "$_lk" 2>/dev/null || { echo "启动锁竞争失败，请稍后再试"; exit 0; }
+      fi
+      date +%s > "$_lk/ts"
+      nohup sh -c "sh '$DIR/container.sh' start >>'$_dt' 2>&1; rm -rf '$_lk'" >/dev/null 2>&1 &
+      echo "容器启动已在后台进行，日志: $_dt"
+      exit 0
+    fi
+    do_start ;;
   stop)   do_stop ;;
   restart) do_stop; do_start ;;
   status) do_status ;;

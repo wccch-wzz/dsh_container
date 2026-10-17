@@ -7,6 +7,10 @@ for s in dsh module-bridge ssh-term sshd; do
   [ -f "$pf" ] && kill "$(cat "$pf" 2>/dev/null)" 2>/dev/null
   rm -f "$pf"
 done
+if [ -f "$STATE_DIR/run/hostd.pid" ]; then
+  kill "$(cat "$STATE_DIR/run/hostd.pid" 2>/dev/null)" 2>/dev/null
+  rm -f "$STATE_DIR/run/hostd.pid"
+fi
 if [ -f "$STATE_DIR/run/container.pid" ]; then
   kill "$(cat "$STATE_DIR/run/container.pid" 2>/dev/null)" 2>/dev/null
   rm -f "$STATE_DIR/run/container.pid"

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./xterm.css">
-<title>DSH Container v0.9.9</title>
+<title>DSH Container v0.10.2</title>
 <style>
   :root{
     --bg:#101418; --card:#181f26; --card2:#1e2730; --fg:#e8eef4;
@@ -100,7 +100,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>DSH Container Standalone <small id="verTag">v0.9.9</small></h1>
+  <h1>DSH Container Standalone <small id="verTag">v0.10.2</small></h1>
 
   <div id="errBox"></div>
 
@@ -182,7 +182,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = '0.9.9';
+  var VERSION = '0.10.2';
   var MOD = '/data/adb/modules/dsh_container/scripts';
   // 运行时状态位于 /data/adb/dsh_container（rootfs/cache/run/logs）。
   var busy = false, pollBusy = false, termBusy = false, d_running_now = false, c_running_now = false, dshStarting = 0;
@@ -326,6 +326,7 @@
 
   var installReady = false;
   var lastInstallState = 'idle';
+  var installStartedAt = 0;
 
   function applyInstall(s) {
     var p = s.progress || {};
@@ -341,7 +342,8 @@
       $('subI').textContent = '资源安装中…' + sizeNote;
       $('installProgress').hidden = false;
       $('progressFill').style.width = Math.max(0, Math.min(100, Number(p.percent || 0))) + '%';
-      $('progressCaption').textContent = (p.percent || 0) + '% · ' + (caption || '正在处理');
+      var elapsed = installStartedAt ? Math.floor((Date.now() - installStartedAt) / 1000) : 0;
+      $('progressCaption').textContent = (p.percent || 0) + '% · ' + (caption || '正在处理') + (elapsed ? ' · 已用时 ' + elapsed + 's' : '');
       $('btnInstall').textContent = '安装中…';
       $('btnInstall').disabled = true;
     } else if (p.state === 'error') {
@@ -349,10 +351,12 @@
       $('installProgress').hidden = false;
       $('progressFill').style.width = Math.max(0, Math.min(100, Number(p.percent || 0))) + '%';
       $('progressFill').style.background = 'var(--bad)';
+      installStartedAt = 0;
       $('progressCaption').textContent = caption + (p.error ? ' · ' + p.error : '');
       $('btnInstall').textContent = '重试安装';
       $('btnInstall').disabled = false;
     } else if (p.state === 'done') {
+      installStartedAt = 0;
       $('subI').textContent = '安装完成 · 模块 v' + s.moduleVersion + sizeNote;
       $('installProgress').hidden = false;
       $('progressFill').style.width = '100%';
@@ -361,6 +365,7 @@
       $('btnInstall').textContent = s.ready ? '重新安装' : '安装资源';
       $('btnInstall').disabled = false;
     } else {
+      installStartedAt = 0;
       $('subI').textContent = s.ready
         ? ('已就绪 · 模块 v' + s.moduleVersion + sizeNote)
         : ('未安装（下载约 111MB；解包后约 1.3GB）' + sizeNote);
@@ -404,7 +409,7 @@
     stopWaitTick();
     waitTimer = setInterval(function () {
       var s = Math.round((Date.now() - t0) / 1000);
-      setEvent(label + ' 进行中… ' + s + 's（最长约 60 秒）');
+      setEvent(label + ' 执行中… ' + s + 's');
     }, 5000);
   }
   function stopWaitTick() {
@@ -774,7 +779,11 @@
     }, '文件检查完成');
   };
   $('btnInstall').onclick = function () {
+    if (busy || lastInstallState === 'running') { showToast('安装正在进行，请等待当前任务结束'); return; }
     if (installReady && !confirm('资源已存在，重新安装会重新下载并替换 rootfs，继续？')) return;
+    installStartedAt = Date.now();
+    showToast('安装开始，进度会显示在“容器资源”下方');
+    setEvent('安装容器资源已开始');
     // A full install outlives the exec bridge's 120s ceiling, so the script detaches and
     // the page tracks it through install-status.sh instead of blocking on one call.
     runAction('安装容器资源', function () {
@@ -788,6 +797,7 @@
   var installPollTimer = null;
   function installPollUntilDone() {
     if (installPollTimer) return;
+    refreshInstall(); // Publish the starting stage immediately.
     installPollTimer = setInterval(function () {
       refreshInstall().then(function () {
         if (installPollTimer && lastInstallState !== 'running') {
@@ -802,10 +812,13 @@
     if (c_running_now) {
       runAction('停止容器', function () { return runScriptChecked('container.sh', 'stop'); }, '容器已停止');
     } else {
-      runAction('启动容器', function () { return runScriptChecked('container.sh', 'start'); }, '容器已启动');
+      // --detach：容器启动要跑 deploy + 等 agent 就绪，同步跑会把 WebUI 执行通道卡死
+      runAction('启动容器', function () { return runScriptChecked('container.sh', 'start', '--detach'); }, '容器启动中…');
+      if (!cPokeTimer) cPokeTimer = setInterval(refreshStatus, 2000);
+      setTimeout(function () { if (cPokeTimer) { clearInterval(cPokeTimer); cPokeTimer = null; } refreshStatus(); }, 60000);
     }
   };
-  var logTimer = null, lastLogLines = [];
+  var logTimer = null, lastLogLines = [], cPokeTimer = null;
   function stopLogPoll() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
   function pollDshLog() {
     if (!dshStarting) { stopLogPoll(); return; }
@@ -839,7 +852,8 @@
         dshStarting = Date.now();
         lastLogLines = [];
         if (!logTimer) logTimer = setInterval(pollDshLog, 2000);
-        return runScriptChecked('dsh.sh', 'start');
+        // --detach：立即返回，页面靠日志轮询与状态轮询跟进，不再阻塞执行通道
+        return runScriptChecked('dsh.sh', 'start', '--detach');
       }, 'DSH 启动中…（约 1 分钟）');
     }
   };

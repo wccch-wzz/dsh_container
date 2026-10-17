@@ -1,0 +1,156 @@
+#!/bin/bash
+# dsh-host — 从容器里直接操作宿主（以 root 身份）。
+#
+# 容器跑在 PRoot 里，只 bind 了 /dev /proc /sys /sdcard，看不到 /data，也没有宿主侧的
+# Node（模块自带的 Node 是 glibc 构建，Android 是 bionic）。所以宿主侧有一个 root 守护进程
+# scripts/hostd.sh 轮询 /root/.dsh-container/hostq，双方用这个目录传命令和结果。
+#
+# 用法:
+#   dsh-host <命令>            # 以宿主 root 执行（等价于 adb shell 之外的 su -c）
+#   dsh-host root <命令>       # 同上，语义更明确
+#   dsh-host sh                # 从 stdin 逐行执行（非交互，适合管道）
+#   dsh-host adb <参数...>     # 调宿主上的 adb（Termux 的 android-tools）
+#   dsh-host devices           # adb devices
+#   dsh-host connect [端口]    # adb connect 127.0.0.1:端口（默认 5599）
+#   dsh-host tcpip [端口]      # 用 root 让 adbd 监听 TCP 并连本机（后台执行，约 10s）
+#   dsh-host tcpip-log         # 看上面那次的日志与结果
+#   dsh-host tcpip-off         # 关掉 TCP adbd（改完就用这个关）
+#   dsh-host status            # 宿主执行器是否在线
+#
+# 例:
+#   dsh-host id
+#   dsh-host 'ls /data/adb/modules'
+#   dsh-host tcpip             # 一次性打通 adb shell
+#   dsh-host adb shell pm list packages | head
+#   printf 'id\nwhoami\n' | dsh-host sh
+set -u
+
+Q=${DSH_HOST_QUEUE:-/root/.dsh-container/hostq}
+TIMEOUT=${DSH_HOST_TIMEOUT:-120}
+
+die() { echo "dsh-host: $*" >&2; exit 125; }
+
+heartbeat_age() {
+  [ -f "$Q/.heartbeat" ] || { echo -1; return; }
+  local hb now
+  hb=$(cat "$Q/.heartbeat" 2>/dev/null)
+  now=$(date +%s)
+  case "$hb" in ''|*[!0-9]*) echo -1; return ;; esac
+  echo $((now - hb))
+}
+
+alive() {
+  local age
+  age=$(heartbeat_age)
+  [ "$age" -ge 0 ] && [ "$age" -le 15 ]
+}
+
+require_hostd() {
+  alive && return 0
+  local age; age=$(heartbeat_age)
+  if [ "$age" -lt 0 ]; then
+    die "宿主执行器从未运行。请在宿主 root shell 执行: sh /data/adb/modules/dsh_container/scripts/hostd.sh start"
+  fi
+  die "宿主执行器已停止 ${age}s。请在宿主 root shell 执行: sh /data/adb/modules/dsh_container/scripts/hostd.sh start"
+}
+
+# 把参数安全地拼成一行命令：容器内没有 argc/argv 通道，只能传字符串。
+quote_all() {
+  local out="" a
+  for a in "$@"; do out+=" $(printf '%q' "$a")"; done
+  printf '%s' "${out# }"
+}
+
+run() {
+  local cmd="$1" id t0 st
+  require_hostd
+  mkdir -p "$Q" 2>/dev/null || die "无法写入队列 $Q"
+  id="$(date +%s)-$$-$RANDOM"
+  printf '%s' "$cmd" > "$Q/$id.req.tmp" 2>/dev/null || die "写队列失败"
+  # 先写 .tmp 再改名：守护进程只看 .req，半截命令永远不会被执行
+  mv -f "$Q/$id.req.tmp" "$Q/$id.req" 2>/dev/null || die "提交命令失败"
+  t0=$(date +%s)
+  while :; do
+    [ -f "$Q/$id.done" ] && break
+    if [ $(( $(date +%s) - t0 )) -ge "$TIMEOUT" ]; then
+      rm -f "$Q/$id.req" "$Q/$id.req.tmp" 2>/dev/null
+      die "超时 ${TIMEOUT}s（宿主命令仍在跑或执行器卡住）"
+    fi
+    sleep 0.1
+  done
+  cat "$Q/$id.out" 2>/dev/null
+  st=$(cat "$Q/$id.rc" 2>/dev/null)
+  st=${st:-0}
+  rm -f "$Q/$id.out" "$Q/$id.rc" "$Q/$id.done" 2>/dev/null
+  return "$st"
+}
+
+usage() {
+  awk 'NR>2 && /^#/ { sub(/^# ?/, ""); print; next } NR>2 { exit }' "$0"
+  exit 2
+}
+
+case "${1:-}" in
+  ''|-h|--help|help) usage ;;
+  status)
+    age=$(heartbeat_age)
+    if [ "$age" -lt 0 ]; then
+      echo "hostd: 未运行（$Q/.heartbeat 不存在）"
+      exit 1
+    fi
+    if [ "$age" -le 15 ]; then
+      echo "hostd: 在线（心跳 ${age}s 前）"
+      run "command -v adb || echo 'adb: 未找到（装 Termux 的 android-tools）'" 2>/dev/null || true
+    else
+      echo "hostd: 离线（心跳 ${age}s 前）"
+      exit 1
+    fi
+    ;;
+  root) shift; [ $# -gt 0 ] || die "root 需要命令"; run "$*" ;;
+  sh|shell)
+    shift
+    if [ $# -gt 0 ]; then run "$*"; exit $?; fi
+    rc_all=0
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      case "$line" in \#*) continue ;; esac
+      run "$line" || rc_all=$?
+    done
+    exit "$rc_all"
+    ;;
+  adb)
+    shift
+    # 残留的离线 transport 会让 adb 报 "more than one device/emulator"，所以用户没指定 -s
+    # 时默认钉到自连目标 127.0.0.1:<port>（它一定在 devices 列表里）。
+    _self="127.0.0.1:${DSH_ADB_SELF_PORT:-5599}"
+    _has_s=0
+    for _a in "$@"; do [ "$_a" = "-s" ] && _has_s=1; done
+    if [ "$_has_s" = 0 ]; then
+      case "$(run "adb devices" 2>/dev/null)" in
+        *"$_self"*) set -- -s "$_self" "$@" ;;
+      esac
+    fi
+    run "adb $(quote_all "$@")"
+    ;;
+  devices) run "adb devices -l" ;;
+  # adbd only listens on TCP after `adb tcpip <port>`, and that command has to come from an
+  # already-authorised adb client — which a phone talking to itself does not have. As root we
+  # can skip the handshake: set the property and bounce adbd, then connect over loopback.
+  tcpip)
+    port="${2:-5599}"
+    # 重启 adbd 会断掉当前 adb 会话，所以整件事交给宿主后台进程做，并把过程写日志。
+    run "nohup /system/bin/sh /data/adb/modules/dsh_container/scripts/adb-self.sh $port >> /data/adb/dsh_container/logs/adb-self.log 2>&1 & echo '已在宿主后台启动（约 10s）'" || true
+    ;;
+  tcpip-log)
+    run "tail -n 30 /data/adb/dsh_container/logs/adb-self.log 2>/dev/null || echo 暂无日志" || true
+    ;;
+  tcpip-off)
+    run "setprop service.adb.tcp.port ''; setprop ctl.restart adbd; sleep 2; echo \"service.adb.tcp.port=[\$(getprop service.adb.tcp.port)]\"" || true
+    ;;
+  connect)
+    port="${2:-5599}"
+    run "adb connect 127.0.0.1:$port" || true
+    run "adb devices -l"
+    ;;
+  *) run "$*" ;;
+esac

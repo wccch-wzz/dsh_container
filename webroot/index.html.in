@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./xterm.css">
-<title>DSH Container v0.9.9</title>
+<title>DSH Container v0.10.2</title>
 <style>
   :root{
     --bg:#101418; --card:#181f26; --card2:#1e2730; --fg:#e8eef4;
@@ -100,7 +100,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>DSH Container Standalone <small id="verTag">v0.9.9</small></h1>
+  <h1>DSH Container Standalone <small id="verTag">v0.10.2</small></h1>
 
   <div id="errBox"></div>
 
@@ -182,7 +182,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = '0.9.9';
+  var VERSION = '0.10.2';
   var MOD = '/data/adb/modules/dsh_container/scripts';
   // 运行时状态位于 /data/adb/dsh_container（rootfs/cache/run/logs）。
   var busy = false, pollBusy = false, termBusy = false, d_running_now = false, c_running_now = false, dshStarting = 0;
@@ -812,10 +812,13 @@
     if (c_running_now) {
       runAction('停止容器', function () { return runScriptChecked('container.sh', 'stop'); }, '容器已停止');
     } else {
-      runAction('启动容器', function () { return runScriptChecked('container.sh', 'start'); }, '容器已启动');
+      // --detach：容器启动要跑 deploy + 等 agent 就绪，同步跑会把 WebUI 执行通道卡死
+      runAction('启动容器', function () { return runScriptChecked('container.sh', 'start', '--detach'); }, '容器启动中…');
+      if (!cPokeTimer) cPokeTimer = setInterval(refreshStatus, 2000);
+      setTimeout(function () { if (cPokeTimer) { clearInterval(cPokeTimer); cPokeTimer = null; } refreshStatus(); }, 60000);
     }
   };
-  var logTimer = null, lastLogLines = [];
+  var logTimer = null, lastLogLines = [], cPokeTimer = null;
   function stopLogPoll() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
   function pollDshLog() {
     if (!dshStarting) { stopLogPoll(); return; }
@@ -849,7 +852,8 @@
         dshStarting = Date.now();
         lastLogLines = [];
         if (!logTimer) logTimer = setInterval(pollDshLog, 2000);
-        return runScriptChecked('dsh.sh', 'start');
+        // --detach：立即返回，页面靠日志轮询与状态轮询跟进，不再阻塞执行通道
+        return runScriptChecked('dsh.sh', 'start', '--detach');
       }, 'DSH 启动中…（约 1 分钟）');
     }
   };

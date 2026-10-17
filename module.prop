@@ -1,6 +1,6 @@
 id=dsh_container
 name=DSH Container Standalone
-version=0.9.9
-versionCode=49
+version=0.10.2
+versionCode=52
 author=YG
 description=Self-contained Ubuntu + DeepSeek Harness container (bundled Android PRoot launcher, no Termux): WebUI container/DSH switches and terminal.

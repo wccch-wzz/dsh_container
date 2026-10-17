@@ -1,0 +1,3 @@
+内置宿主工具版标记：存在本文件且同目录有 dsh-host-tool/ 时，
+deploy.sh 会把插件落到 rootfs，dsh.sh start 会自动挂进 web profile。
+精简版发行包会删掉本文件与 dsh-host-tool/ 目录。
