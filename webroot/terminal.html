@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./xterm.css">
+<title>容器终端</title>
+<style>
+  :root{
+    --bg:#0b0f13; --bar:#111820; --fg:#e8eef4; --dim:#8fa3b4;
+    --acc:#4aa3ff; --ok:#42d392; --bad:#ff5c5c; --line:#22303c;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Noto Sans SC",sans-serif;
+    overscroll-behavior:none}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column;
+    padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+
+  #bar{display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--bar);
+    border-bottom:1px solid var(--line);flex:0 0 auto}
+  #bar .t{flex:1;display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;
+    overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  #bar button{appearance:none;border:1px solid var(--line);background:#1a232c;color:var(--fg);
+    border-radius:8px;padding:6px 10px;font-size:12px;line-height:1;cursor:pointer}
+  #bar button:active{transform:scale(.96)}
+  #btnBack{font-size:15px;padding:5px 11px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#555;flex:0 0 auto}
+  .dot.ok{background:var(--ok);box-shadow:0 0 6px rgba(66,211,146,.75)}
+  .dot.bad{background:var(--bad);box-shadow:0 0 6px rgba(255,92,92,.6)}
+  .dot.pending{background:#d29922;box-shadow:0 0 6px rgba(210,153,34,.7)}
+
+  #menu{position:absolute;right:8px;top:calc(env(safe-area-inset-top) + 44px);z-index:20;
+    display:none;flex-direction:column;background:#18212a;border:1px solid var(--line);
+    border-radius:10px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,.55)}
+  #menu.show{display:flex}
+  #menu button{border:none;border-radius:0;background:transparent;padding:11px 18px;
+    font-size:13px;text-align:left;min-width:150px}
+  #menu button:active{background:#22303c}
+
+  #host{position:relative;flex:1 1 auto;min-height:0;padding:2px 2px 0;overflow:hidden}
+  #host .xterm{height:100%}
+  /* 自己接管手势：关掉原生像素滚动，否则会和按行滚动互相打架 */
+  .xterm-viewport{overflow:hidden!important;touch-action:none;overscroll-behavior:none}
+  .xterm-screen{touch-action:none}
+
+  #ind{position:absolute;right:3px;top:4px;bottom:4px;width:3px;border-radius:2px;
+    background:rgba(255,255,255,.06);opacity:0;transition:opacity .18s;pointer-events:none;z-index:6}
+  #ind.show{opacity:1}
+  #ind .thumb{width:100%;border-radius:2px;background:rgba(74,163,255,.85);
+    transition:transform .04s linear;will-change:transform}
+
+  #toBottom{position:absolute;right:12px;bottom:12px;width:38px;height:38px;border-radius:50%;
+    background:rgba(74,163,255,.94);color:#04121f;border:none;font-size:16px;font-weight:700;
+    display:none;align-items:center;justify-content:center;z-index:7;padding:0;
+    box-shadow:0 4px 14px rgba(0,0,0,.5)}
+  #toBottom.show{display:flex}
+
+  #keys{display:flex;gap:6px;padding:6px 8px;background:var(--bar);border-top:1px solid var(--line);
+    overflow-x:auto;overflow-y:hidden;flex:0 0 auto;-webkit-overflow-scrolling:touch;
+    touch-action:pan-x;scrollbar-width:none}
+  #keys::-webkit-scrollbar{display:none}
+  #keys button{flex:0 0 auto;appearance:none;border:1px solid var(--line);background:#1a232c;
+    color:var(--fg);border-radius:8px;padding:7px 11px;font-size:12px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;cursor:pointer}
+  #keys button.on{background:var(--acc);border-color:var(--acc);color:#04121f;font-weight:700}
+  #keys button:active{transform:scale(.96)}
+
+  #hud{position:absolute;left:50%;bottom:64px;transform:translateX(-50%) translateY(6px);
+    background:#22303c;border:1px solid var(--line);color:var(--fg);padding:8px 15px;
+    border-radius:10px;font-size:12px;opacity:0;transition:opacity .18s,transform .18s;
+    pointer-events:none;max-width:84vw;text-align:center;z-index:50}
+  #hud.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <button id="btnBack" title="返回">←</button>
+    <div class="t"><span id="dot" class="dot"></span><span id="title">容器终端</span></div>
+    <button id="btnFontMinus">A-</button>
+    <button id="btnFontPlus">A+</button>
+    <button id="btnMenu">⋯</button>
+  </div>
+
+  <div id="host">
+    <div id="ind"><div class="thumb"></div></div>
+    <button id="toBottom" title="回到底部">↓</button>
+  </div>
+
+  <div id="keys"></div>
+  <div id="hud"></div>
+</div>
+
+<div id="menu">
+  <button data-act="copy">复制选区</button>
+  <button data-act="copyall">复制全部输出</button>
+  <button data-act="textview">系统选择（长按复制）</button>
+  <button data-act="paste">粘贴</button>
+  <button data-act="clear">清屏</button>
+  <button data-act="bottom">回到底部</button>
+  <button data-act="reconnect">重新连接</button>
+  <button data-act="close">关闭页面</button>
+</div>
+
+<script src="./xterm.js"></script>
+<script src="./term-scroll.js"></script>
+<script>
+(function () {
+  'use strict';
+  var WS_PORT_DEFAULT = 23992;
+  var FONT_KEY = 'dsh-term-font';
+  // 端口与 token 由 ssh-term.js 写在 rootfs 的 ws.endpoint（mode 0600）。
+  // index.html 拿到后会存进 localStorage（同源共享），单独打开本页时直接复用。
+  var WS_ENDPOINT_HOST = '/data/adb/dsh_container/rootfs/root/.dsh-container/ws.endpoint';
+  var wsEndpoint = { port: WS_PORT_DEFAULT, token: '' };
+  var wsEndpointLoaded = false;
+  var fontSize = 13;
+  try { fontSize = parseInt(localStorage.getItem(FONT_KEY), 10) || 13; } catch (e) {}
+
+  var term = null, ws = null, wsTimer = null, retry = 0;
+  var lastSentSize = '', fitTimer = null, ctrlSticky = false, altSticky = false;
+  var scroller = null, sel = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function hud(msg) {
+    var el = $('hud');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(hud._t);
+    hud._t = setTimeout(function () { el.classList.remove('show'); }, 1800);
+  }
+
+  function status(text, cls) {
+    $('title').textContent = text;
+    $('dot').className = 'dot' + (cls ? ' ' + cls : '');
+  }
+
+  function cellSize() {
+    var fs = fontSize, ff = 'monospace', lh = 1.15;
+    try {
+      if (term.options.fontSize) fs = term.options.fontSize;
+      if (term.options.fontFamily) ff = term.options.fontFamily;
+      if (term.options.lineHeight) lh = term.options.lineHeight;
+    } catch (e) {}
+    try {
+      var d = term._core._renderService.dimensions;
+      if (d && d.css && d.css.cell && d.css.cell.width > 0) {
+        return { w: d.css.cell.width, h: d.css.cell.height };
+      }
+    } catch (e) {}
+    var span = document.createElement('span');
+    span.style.cssText = 'position:absolute;left:-9999px;visibility:hidden;white-space:pre;' +
+      'font-family:' + ff + ';font-size:' + fs + 'px;line-height:' + lh;
+    span.textContent = 'W'.repeat(32);
+    document.body.appendChild(span);
+    var w = span.getBoundingClientRect().width / 32;
+    document.body.removeChild(span);
+    return { w: w || fs * 0.6, h: Math.ceil(fs * lh) };
+  }
+
+  function fit() {
+    if (!term || !term.element) return;
+    var host = $('host');
+    var w = host.clientWidth, h = host.clientHeight;
+    if (w < 24 || h < 24) return;
+    var c = cellSize();
+    var cols = Math.max(20, Math.floor((w - 4) / c.w));
+    var rows = Math.max(4, Math.floor((h - 4) / c.h));
+    if (cols === term.cols && rows === term.rows) return;
+    var atBottom = scroller ? scroller.isAtBottom() : true;
+    try { term.resize(cols, rows); } catch (e) {}
+    if (atBottom) { try { term.scrollToBottom(); } catch (e) {} }
+    if (scroller) scroller.refreshIndicator();
+  }
+
+  function scheduleFit(delay) {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(fit, delay || 160);
+  }
+
+  // 软键盘弹出时 Android WebView 不一定会收缩布局，直接把 #app 钉到 visualViewport 上
+  function syncViewport() {
+    var app = $('app'), vv = window.visualViewport;
+    if (!vv) return;
+    app.style.height = vv.height + 'px';
+    app.style.top = vv.offsetTop + 'px';
+    app.style.bottom = 'auto';
+  }
+
+  function b64(str) {
+    var bytes = new TextEncoder().encode(str), bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  function send(data) {
+    if (!data) return;
+    if (ctrlSticky) {
+      ctrlSticky = false; syncMods();
+      if (data.length === 1) {
+        var c = data.toUpperCase().charCodeAt(0);
+        if (c >= 64 && c <= 95) data = String.fromCharCode(c - 64);
+      }
+    }
+    if (altSticky) {
+      altSticky = false; syncMods();
+      data = '\x1b' + data;
+    }
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'stdin', data: b64(data) }));
+    }
+  }
+
+  function parseEndpoint(text) {
+    var o = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var m = /^([A-Za-z_]+)=(.*)$/.exec(line.trim());
+      if (m) o[m[1]] = m[2];
+    });
+    return o;
+  }
+
+  function ksuCat(path) {
+    return new Promise(function (resolve) {
+      if (typeof ksu === 'undefined' || !ksu || typeof ksu.exec !== 'function') { resolve(''); return; }
+      var cb = 'termcb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      var done = false;
+      var finish = function (out) { if (!done) { done = true; resolve(out || ''); } };
+      window[cb] = function (errno, stdout) {
+        try { delete window[cb]; } catch (e) {}
+        finish(stdout);
+      };
+      setTimeout(function () { finish(''); }, 5000);
+      try { ksu.exec('cat ' + path + ' 2>/dev/null', '{}', cb); } catch (e) { finish(''); }
+    });
+  }
+
+  function loadWsEndpoint(force) {
+    if (wsEndpointLoaded && !force) return Promise.resolve(wsEndpoint);
+    if (!force) {
+      try {
+        var c = JSON.parse(localStorage.getItem('dsh-ws-endpoint') || 'null');
+        if (c && c.port && c.token) {
+          wsEndpoint = { port: c.port, token: c.token };
+          wsEndpointLoaded = true;
+          return Promise.resolve(wsEndpoint);
+        }
+      } catch (e) {}
+    }
+    return ksuCat(WS_ENDPOINT_HOST).then(function (txt) {
+      var o = parseEndpoint(txt);
+      if (o.port && o.token) {
+        wsEndpoint = { port: parseInt(o.port, 10) || WS_PORT_DEFAULT, token: o.token };
+        wsEndpointLoaded = true;
+        try { localStorage.setItem('dsh-ws-endpoint', JSON.stringify(wsEndpoint)); } catch (e) {}
+      }
+      return wsEndpoint;
+    });
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+    status('连接中…', 'pending');
+    loadWsEndpoint().then(openSocket);
+  }
+
+  function openSocket() {
+    var sock;
+    try {
+      sock = new WebSocket('ws://127.0.0.1:' + wsEndpoint.port + '/?token=' + encodeURIComponent(wsEndpoint.token));
+    } catch (e) {
+      status('无法建立连接', 'bad');
+      return;
+    }
+    var opened = false;
+    sock.binaryType = 'arraybuffer';
+    ws = sock;
+
+    sock.onopen = function () {
+      opened = true;
+      retry = 0;
+      status('容器终端', 'ok');
+      lastSentSize = '';
+      try { sock.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); } catch (e) {}
+      try { term.focus(); } catch (e) {}
+    };
+    sock.onmessage = function (ev) {
+      if (typeof ev.data === 'string') term.write(ev.data);
+      else term.write(new Uint8Array(ev.data));
+    };
+    sock.onclose = function () {
+      ws = null;
+      if (!opened) { wsEndpointLoaded = false; try { localStorage.removeItem('dsh-ws-endpoint'); } catch (e) {} }
+      status('已断开，重连中…', 'pending');
+      retry = Math.min(retry + 1, 6);
+      clearTimeout(wsTimer);
+      wsTimer = setTimeout(connect, Math.min(500 * retry, 3000));
+    };
+    sock.onerror = function () { status('连接错误', 'bad'); };
+  }
+
+  var KEYS = [
+    ['ESC', '\x1b'], ['TAB', '\t'], ['CTRL', '@ctrl'], ['ALT', '@alt'],
+    ['←', '\x1b[D'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['→', '\x1b[C'],
+    ['HOME', '\x1b[H'], ['END', '\x1b[F'], ['PGUP', '\x1b[5~'], ['PGDN', '\x1b[6~'],
+    ['/', '/'], ['-', '-'], ['|', '|'], ['~', '~']
+  ];
+
+  function buildKeys() {
+    var bar = $('keys');
+    KEYS.forEach(function (k) {
+      var b = document.createElement('button');
+      b.textContent = k[0];
+      if (k[1] === '@ctrl') b.id = 'keyCtrl';
+      if (k[1] === '@alt') b.id = 'keyAlt';
+      b.onclick = function (ev) {
+        ev.preventDefault();
+        if (k[1] === '@ctrl') { ctrlSticky = !ctrlSticky; syncMods(); term.focus(); return; }
+        if (k[1] === '@alt') { altSticky = !altSticky; syncMods(); term.focus(); return; }
+        send(k[1]);
+        term.focus();
+      };
+      bar.appendChild(b);
+    });
+  }
+
+  function syncMods() {
+    var c = $('keyCtrl'), a = $('keyAlt');
+    if (c) c.classList.toggle('on', ctrlSticky);
+    if (a) a.classList.toggle('on', altSticky);
+  }
+
+  function setFont(delta) {
+    fontSize = Math.max(8, Math.min(24, fontSize + delta));
+    try { term.options.fontSize = fontSize; } catch (e) {}
+    try { localStorage.setItem(FONT_KEY, String(fontSize)); } catch (e) {}
+    fit();
+    hud('字号 ' + fontSize + 'px');
+  }
+
+  function closeMenu() { $('menu').classList.remove('show'); }
+
+  function doPaste() {
+    var finish = function (txt) {
+      if (txt) { send(txt); hud('已粘贴 ' + txt.length + ' 字'); }
+      term.focus();
+    };
+    var ask = function () {
+      var t = window.prompt('此环境不允许读剪贴板，请把内容粘贴到下面：', '');
+      if (t) finish(t);
+    };
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(finish).catch(ask);
+      return;
+    }
+    ask();
+  }
+
+  function bindMenu() {
+    $('btnMenu').onclick = function (ev) {
+      ev.stopPropagation();
+      $('menu').classList.toggle('show');
+    };
+    document.addEventListener('click', closeMenu);
+    $('menu').onclick = function (ev) {
+      var act = ev.target && ev.target.getAttribute('data-act');
+      if (!act) return;
+      ev.stopPropagation();
+      closeMenu();
+      if (act === 'copy') sel && sel.copySelection();
+      else if (act === 'copyall') sel && sel.copyAll();
+      else if (act === 'textview') sel && sel.showTextView();
+      else if (act === 'paste') doPaste();
+      else if (act === 'clear') { term.clear(); hud('已清屏'); }
+      else if (act === 'bottom') { term.scrollToBottom(); hud('已回到底部'); }
+      else if (act === 'reconnect') { try { ws && ws.close(); } catch (e) {} ws = null; connect(); hud('正在重连'); }
+      else if (act === 'close') goBack();
+    };
+  }
+
+  function goBack() {
+    if (history.length > 1) history.back();
+    else location.href = './index.html';
+  }
+
+  function boot() {
+    buildKeys();
+    bindMenu();
+    $('btnBack').onclick = goBack;
+    $('btnFontMinus').onclick = function () { setFont(-1); };
+    $('btnFontPlus').onclick = function () { setFont(1); };
+
+    if (typeof Terminal === 'undefined') {
+      status('xterm.js 未加载', 'bad');
+      return;
+    }
+
+    term = new Terminal({
+      fontSize: fontSize,
+      cursorBlink: true,
+      scrollback: 10000,
+      scrollOnUserInput: true,
+      smoothScrollDuration: 0,
+      fontFamily: 'ui-monospace, Menlo, Consolas, "Noto Sans Mono", monospace',
+      lineHeight: 1.15,
+      theme: {
+        background: '#0b0f13', foreground: '#cfd8e3',
+        cursor: '#4aa3ff', selection: 'rgba(74,163,255,.30)'
+      }
+    });
+    term.open($('host'));
+
+    if (typeof attachTermSelection === 'function') {
+      sel = attachTermSelection(term, { host: $('host'), onToast: hud });
+    }
+    if (typeof attachTouchScroll === 'function') {
+      scroller = attachTouchScroll(term, {
+        indicator: $('ind'),
+        selection: sel ? sel.ctl : null
+      });
+    }
+
+    term.onData(function (d) { send(d); });
+    term.onResize(function (size) {
+      var key = size.cols + 'x' + size.rows;
+      if (key === lastSentSize) return;
+      lastSentSize = key;
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+      }
+    });
+    term.onScroll(function () {
+      var btn = $('toBottom');
+      if (btn) btn.classList.toggle('show', !(scroller && scroller.isAtBottom()));
+    });
+    $('toBottom').onclick = function () {
+      term.scrollToBottom();
+      this.classList.remove('show');
+    };
+
+    fit();
+    setTimeout(fit, 120);
+    syncViewport();
+    setTimeout(function () { syncViewport(); fit(); }, 60);
+    connect();
+
+    window.addEventListener('resize', function () { syncViewport(); scheduleFit(160); });
+    window.addEventListener('orientationchange', function () { syncViewport(); scheduleFit(320); });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', function () { syncViewport(); scheduleFit(160); });
+      window.visualViewport.addEventListener('scroll', function () { syncViewport(); scheduleFit(160); });
+    }
+
+    try {
+      if (!localStorage.getItem('dsh-term-selhint')) {
+        localStorage.setItem('dsh-term-selhint', '1');
+        setTimeout(function () { hud('长按终端选词复制，或 ⋯ → 系统选择'); }, 1500);
+      }
+    } catch (e) {}
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>
+</body>
+</html>

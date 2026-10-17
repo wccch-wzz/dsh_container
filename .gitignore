@@ -1,0 +1,10 @@
+*.zip
+*.log
+*.tmp
+/tmp/
+/.cache/
+/rootfs/
+/cache/
+/run/
+/logs/
+.DS_Store

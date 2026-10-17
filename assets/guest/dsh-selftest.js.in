@@ -1,0 +1,40 @@
+// dsh-selftest.js — verify the full authorization chain inside the container:
+// startup token -> authorize -> cookie -> authenticated 200.
+const fs = require('fs');
+const http = require('http');
+
+const DSH_PORT = @DSH_PORT@;
+const DSH_LOG = '/root/.dsh-container/dsh.log';
+const TOKEN_RE = /http:\/\/127\.0\.0\.1:@DSH_PORT@\/\?token=[A-Za-z0-9._~-]{8,}/g;
+
+function request(path, headers) {
+  return new Promise((resolve) => {
+    const req = http.request({ hostname: '127.0.0.1', port: DSH_PORT, path, method: 'GET', headers: headers || {} }, (res) => {
+      let body = '';
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+    req.on('error', (e) => resolve({ status: 0, error: e.message }));
+    req.end();
+  });
+}
+
+(async () => {
+  let log = '';
+  try { log = fs.readFileSync(DSH_LOG, 'utf8'); } catch (e) { log = ''; }
+  const all = log.match(TOKEN_RE) || [];
+  const tokenUrl = all.length ? all[all.length - 1] : null;
+  if (!tokenUrl) { console.log(JSON.stringify({ ok: false, reason: 'no-token-line' })); process.exit(1); }
+  const path = tokenUrl.replace('http://127.0.0.1:' + DSH_PORT, '');
+  const auth = await request(path);
+  const setCookie = auth.headers && auth.headers['set-cookie'];
+  if (auth.status !== 303 && auth.status !== 302) {
+    console.log(JSON.stringify({ ok: false, reason: 'authorize-status', status: auth.status }));
+    process.exit(1);
+  }
+  const cookie = setCookie ? String(setCookie[0]).split(';')[0] : null;
+  const page = await request('/', cookie ? { cookie } : {});
+  const ok = page.status === 200;
+  console.log(JSON.stringify({ port: DSH_PORT, token_line: true, authorize_status: auth.status, cookie: !!cookie, authenticated_status: page.status, ok }));
+  process.exit(ok ? 0 : 1);
+})();

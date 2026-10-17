@@ -1,0 +1,25 @@
+#!/bin/bash
+# dsh-run.sh — start the DSH web profile plus its authorization bridge, inside the container.
+set -e
+cd @WORKSPACE_ROOT@ 2>/dev/null || cd /root
+export HOME=/root
+# Node refuses --expose-internals inside NODE_OPTIONS ("--expose-internals is not allowed in
+# NODE_OPTIONS" on Node 24) and exits immediately, so it is passed on the command line below.
+export TMPDIR=@WORKSPACE_TMP@
+# /sdcard is a FUSE mount and cannot serve executable mmap: the native addon loader copies
+# require_builtin.node into $TMPDIR and dlopen()s it from there, which fails with
+# "failed to map segment from shared object". Force TMPDIR onto the ext4 data partition.
+case "$TMPDIR" in
+  /sdcard/*|/storage/*|/mnt/*) export TMPDIR=/data/adb/dsh_container/tmp ;;
+esac
+mkdir -p "$TMPDIR" 2>/dev/null
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+export DSH_WEB_HOST=127.0.0.1
+export DSH_WEB_PORT=@DSH_PORT@
+
+nohup @NODE@ /root/.dsh-container/module-bridge.js > /root/.dsh-container/module-bridge.log 2>&1 &
+echo $! > /root/.dsh-container/module-bridge.pid
+
+exec @NODE@ --expose-internals @DSH_ENTRY@ web --port @DSH_PORT@ --no-open \
+  --trusted-host 127.0.0.1:@DSH_PORT@ \
+  --trusted-host localhost:@DSH_PORT@

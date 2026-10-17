@@ -1,0 +1,26 @@
+#!/bin/bash
+# sshd-run.sh — loopback-only SSH server inside the container, for the WebUI terminal.
+set -u
+SSH_PORT="@SSH_PORT@"
+AUTH_DIR=/root/.ssh
+HOSTKEY=/etc/ssh/ssh_host_ed25519_key
+
+mkdir -p "$AUTH_DIR" /run/sshd
+chmod 700 "$AUTH_DIR"
+[ -f "$HOSTKEY" ] || ssh-keygen -A >/dev/null 2>&1 || true
+if [ ! -f "$AUTH_DIR/id_ed25519" ]; then
+  ssh-keygen -t ed25519 -N "" -f "$AUTH_DIR/id_ed25519" -q || exit 1
+fi
+cp -f "$AUTH_DIR/id_ed25519.pub" "$AUTH_DIR/authorized_keys" 2>/dev/null
+chmod 600 "$AUTH_DIR/authorized_keys" 2>/dev/null
+
+exec /usr/sbin/sshd -D -e \
+  -p "$SSH_PORT" \
+  -o ListenAddress=127.0.0.1 \
+  -o PermitRootLogin=prohibit-password \
+  -o PasswordAuthentication=no \
+  -o PubkeyAuthentication=yes \
+  -o UsePAM=no \
+  -o PrintMotd=no \
+  -o X11Forwarding=no \
+  -o AllowTcpForwarding=yes

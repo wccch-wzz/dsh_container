@@ -1,0 +1,335 @@
+// ssh-term.js — WebSocket terminal for the WebUI, runs inside the container.
+//
+// History: this used to open `ssh root@127.0.0.1` against the container's own sshd.
+// That hop is gone on purpose: PRoot cannot serve accept()/accept4() for sshd here, so
+// the server logs "accept: Function not implemented" forever and every client stalls at
+// "Connection timed out during banner exchange". A pseudo terminal is what the browser
+// actually needs, so the session is now a local pty (`script`) running bash. sshd may
+// still be started for other uses; the terminal no longer depends on it.
+const http = require('http');
+const fs = require('fs');
+const crypto = require('crypto');
+const { spawn, execFile } = require('child_process');
+
+const LISTEN_PORT = @WS_PORT@;
+const SHELL_BIN = '/bin/bash';
+const SCRIPT_BIN = '/usr/bin/script';
+const MAX_FRAME = 16 * 1024 * 1024;
+const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+// ---- 鉴权与端口 ----------------------------------------------------------
+// 终端给的是一个 root shell。虽然只 bind 127.0.0.1，但 Android 上任意 App 都能连
+// loopback，所以必须带一次性 token（root 可读、mode 0600）才允许升级连接。
+// 端口也改成“首选 LISTEN_PORT，被占就往后找”：宿主上 23992 被占过，硬编码会让终端直接死。
+const STATE_DIR = '/root/.dsh-container';
+const TOKEN_FILE = STATE_DIR + '/ws.token';
+const ENDPOINT_FILE = STATE_DIR + '/ws.endpoint';
+const PORT_SCAN = 20;
+
+function loadToken() {
+  try {
+    const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+    if (/^[0-9a-f]{32,}$/.test(t)) return t;
+  } catch (_) {}
+  const t = crypto.randomBytes(24).toString('hex');
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(TOKEN_FILE, t + '\n', { mode: 0o600 });
+    fs.chmodSync(TOKEN_FILE, 0o600);
+  } catch (e) {
+    console.log('[ssh-term] cannot persist token: ' + e.message);
+  }
+  return t;
+}
+
+const TOKEN = loadToken();
+
+function tokenOk(req) {
+  try {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    const t = u.searchParams.get('token') || req.headers['x-dsh-token'] || '';
+    if (t.length !== TOKEN.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(t), Buffer.from(TOKEN));
+  } catch (_) { return false; }
+}
+
+function writeEndpoint(port) {
+  try {
+    fs.writeFileSync(ENDPOINT_FILE, 'port=' + port + '\ntoken=' + TOKEN + '\n', { mode: 0o600 });
+    fs.chmodSync(ENDPOINT_FILE, 0o600);
+  } catch (e) {
+    console.log('[ssh-term] cannot write endpoint: ' + e.message);
+  }
+}
+
+function acceptKey(key) {
+  return crypto.createHash('sha1').update(key + GUID).digest('base64');
+}
+
+function parseFrames(buf) {
+  const frames = [];
+  let off = 0;
+  for (;;) {
+    if (buf.length - off < 2) break;
+    const b0 = buf[off];
+    const b1 = buf[off + 1];
+    const fin = (b0 & 0x80) !== 0;
+    const opcode = b0 & 0x0f;
+    const masked = (b1 & 0x80) !== 0;
+    let len = b1 & 0x7f;
+    let p = off + 2;
+    if (len === 126) {
+      if (buf.length - p < 2) break;
+      len = buf.readUInt16BE(p); p += 2;
+    } else if (len === 127) {
+      if (buf.length - p < 8) break;
+      const hi = buf.readUInt32BE(p);
+      const lo = buf.readUInt32BE(p + 4);
+      len = hi * 0x100000000 + lo;
+      p += 8;
+    }
+    if (len > MAX_FRAME) return { frames, rest: null, overflow: true };
+    let mask;
+    if (masked) {
+      if (buf.length - p < 4) break;
+      mask = buf.slice(p, p + 4); p += 4;
+    }
+    if (buf.length - p < len) break;
+    let payload = buf.slice(p, p + len);
+    if (masked) {
+      const out = Buffer.allocUnsafe(len);
+      for (let i = 0; i < len; i++) out[i] = payload[i] ^ mask[i & 3];
+      payload = out;
+    }
+    p += len;
+    frames.push({ fin, opcode, payload });
+    off = p;
+    if (!fin) continue;
+  }
+  return { frames, rest: buf.slice(off) };
+}
+
+function encodeFrame(payload, opcode) {
+  const len = payload.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.allocUnsafe(2);
+    header[1] = len;
+  } else if (len < 65536) {
+    header = Buffer.allocUnsafe(4);
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.allocUnsafe(10);
+    header[1] = 127;
+    header.writeUInt32BE(0, 2);
+    header.writeUInt32BE(len, 6);
+  }
+  header[0] = 0x80 | (opcode & 0x0f);
+  return Buffer.concat([header, payload]);
+}
+
+const HAVE_SCRIPT = (() => {
+  try { return fs.statSync(SCRIPT_BIN).isFile(); } catch (_) { return false; }
+})();
+
+const STTY_BIN = (() => {
+  try { return fs.statSync('/bin/stty').isFile() ? '/bin/stty' : 'stty'; } catch (_) { return 'stty'; }
+})();
+
+// Window size must be set OUT OF BAND.
+// The old code wrote `stty cols N rows M` into the shell's stdin, so the shell treated it
+// as typed input and echoed it: every resize (rotation, keyboard open, first layout pass)
+// dropped a visible "stty cols .. rows .." line under the prompt. Instead, locate the
+// shell's pty slave device and set TIOCSWINSZ with `stty -F <tty>`; the kernel then sends
+// SIGWINCH to the pty's foreground process group by itself.
+function findPtySlave(pid) {
+  const kids = [];
+  try {
+    const raw = fs.readFileSync('/proc/' + pid + '/task/' + pid + '/children', 'utf8').trim();
+    for (const k of raw.split(/\s+/)) if (k) kids.push(k);
+  } catch (_) {}
+  if (!kids.length) {
+    // Fallback for kernels without CONFIG_PROC_CHILDREN: scan for PPid === pid.
+    let names = [];
+    try { names = fs.readdirSync('/proc'); } catch (_) {}
+    for (const n of names) {
+      if (!/^\d+$/.test(n)) continue;
+      try {
+        const st = fs.readFileSync('/proc/' + n + '/stat', 'utf8');
+        const rest = st.slice(st.lastIndexOf(')') + 2).split(' ');
+        if (parseInt(rest[1], 10) === pid) kids.push(n);
+      } catch (_) {}
+    }
+  }
+  for (const k of kids) {
+    for (const fd of ['0', '1', '2']) {
+      try {
+        const t = fs.readlinkSync('/proc/' + k + '/fd/' + fd);
+        if (/^\/dev\/pts\/\d+$/.test(t)) return t;
+      } catch (_) {}
+    }
+  }
+  return '';
+}
+
+const server = http.createServer((req, res) => {
+  res.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end('ssh-term: WebSocket endpoint only');
+});
+
+server.on('upgrade', (req, socket) => {
+  const key = req.headers['sec-websocket-key'];
+  if (!key) { socket.destroy(); return; }
+  // 没带 token 或 token 不对：直接 401，绝不起 shell
+  if (!tokenOk(req)) {
+    try {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n' +
+                   'content-type: text/plain; charset=utf-8\r\n' +
+                   'connection: close\r\n\r\n' +
+                   'ssh-term: missing or invalid token\n');
+      socket.destroy();
+    } catch (_) {}
+    console.log('[ssh-term] rejected upgrade without valid token');
+    return;
+  }
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    'Sec-WebSocket-Accept: ' + acceptKey(key) + '\r\n\r\n'
+  );
+
+  let sess = null;
+  let closed = false;
+  let buf = Buffer.alloc(0);
+  let ttyPath = '';
+  let pendingSize = null;
+  let sizeTimer = null;
+
+  // Resolve the pty lazily: `script` needs a moment to spawn bash, so the very first
+  // resize (sent right after the socket opens) may arrive before /proc has the child.
+  const trySize = (attempt) => {
+    if (!sess || closed || !pendingSize) return;
+    if (!ttyPath) ttyPath = findPtySlave(sess.pid);
+    if (!ttyPath) {
+      if (attempt < 25) {
+        clearTimeout(sizeTimer);
+        sizeTimer = setTimeout(() => trySize(attempt + 1), 150);
+      }
+      return;
+    }
+    const want = pendingSize;
+    pendingSize = null;
+    execFile(STTY_BIN, ['-F', ttyPath, 'cols', String(want.cols), 'rows', String(want.rows)], (err) => {
+      if (err) {
+        // pty may have been recreated; re-resolve next time
+        ttyPath = '';
+        pendingSize = want;
+        if (attempt < 25) { clearTimeout(sizeTimer); sizeTimer = setTimeout(() => trySize(attempt + 1), 150); }
+      }
+    });
+  };
+  const applySize = (cols, rows) => {
+    pendingSize = { cols: cols, rows: rows };
+    trySize(0);
+  };
+
+  const fail = (msg) => {
+    if (closed) return;
+    closed = true;
+    try { socket.write(encodeFrame(Buffer.from('\r\n[term] ' + msg + '\r\n'), 0x1)); } catch (_) {}
+    try { socket.end(); } catch (_) {}
+    try { if (sess) sess.kill('SIGKILL'); } catch (_) {}
+  };
+
+  const env = Object.assign({}, process.env, {
+    TERM: 'xterm-256color',
+    LANG: 'C.UTF-8',
+    HOME: '/root',
+    SHELL: SHELL_BIN,
+  });
+
+  // `script -qfc` allocates a real pty for the shell, so xterm gets echo, job control and
+  // window size changes. Without it bash would run on a pipe and look frozen.
+  if (HAVE_SCRIPT) {
+    sess = spawn(SCRIPT_BIN, ['-qfc', SHELL_BIN + ' -l', '/dev/null'], {
+      env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } else {
+    sess = spawn(SHELL_BIN, ['-l'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+
+  sess.on('error', (e) => fail('cannot start shell: ' + e.message));
+  sess.on('exit', (code) => {
+    clearTimeout(sizeTimer);
+    if (!closed) {
+      closed = true;
+      try { socket.write(encodeFrame(Buffer.from('\r\n[term] session ended (code ' + code + ')\r\n'), 0x1)); } catch (_) {}
+      try { socket.end(); } catch (_) {}
+    }
+  });
+  sess.stdout.on('data', (d) => { if (!closed) { try { socket.write(encodeFrame(d, 0x2)); } catch (_) { closed = true; } } });
+  sess.stderr.on('data', (d) => { if (!closed) { try { socket.write(encodeFrame(d, 0x2)); } catch (_) { closed = true; } } });
+
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    const { frames, rest, overflow } = parseFrames(buf);
+    if (overflow || rest === null) { fail('frame exceeds limit'); return; }
+    buf = rest;
+    for (const f of frames) {
+      if (f.opcode === 0x8) {
+        try { socket.end(); } catch (_) {}
+        try { if (sess) sess.kill('SIGTERM'); } catch (_) {}
+        return;
+      }
+      if (f.opcode === 0x9) { try { socket.write(encodeFrame(f.payload, 0xA)); } catch (_) {} continue; }
+      if (f.opcode === 0xA) continue;
+      if (!sess || closed) continue;
+      const text = f.payload.toString('utf8');
+      if (text.length > 1 && text[0] === '{') {
+        try {
+          const msg = JSON.parse(text);
+          if (msg.type === 'resize' && msg.cols > 0 && msg.rows > 0) {
+            applySize(msg.cols | 0, msg.rows | 0);
+            continue;
+          }
+          if (msg.type === 'stdin' && typeof msg.data === 'string') {
+            sess.stdin.write(Buffer.from(msg.data, 'base64'));
+            continue;
+          }
+        } catch (_) {}
+      }
+      try { sess.stdin.write(f.payload); } catch (_) {}
+    }
+  });
+
+  socket.on('error', () => { closed = true; try { if (sess) sess.kill('SIGKILL'); } catch (_) {} });
+  socket.on('close', () => { closed = true; try { if (sess) sess.kill('SIGTERM'); } catch (_) {} });
+});
+
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    const next = currentPort + 1;
+    if (next <= LISTEN_PORT + PORT_SCAN) {
+      console.log('[ssh-term] port ' + currentPort + ' in use; trying ' + next);
+      currentPort = next;
+      setTimeout(function () { server.listen(currentPort, '127.0.0.1', onListening); }, 60);
+      return;
+    }
+    console.log('[ssh-term] no free port in ' + LISTEN_PORT + '..' + (LISTEN_PORT + PORT_SCAN) + '; exiting');
+    process.exit(0);
+  }
+  throw e;
+});
+
+let currentPort = LISTEN_PORT;
+
+function onListening() {
+  currentPort = server.address().port;
+  writeEndpoint(currentPort);
+  console.log('[ssh-term] listening 127.0.0.1:' + currentPort +
+              ' (local pty, script=' + HAVE_SCRIPT + ', token auth on)');
+}
+
+server.listen(currentPort, '127.0.0.1', onListening);

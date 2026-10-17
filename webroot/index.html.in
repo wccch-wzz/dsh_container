@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./xterm.css">
+<title>DSH Container v0.9.9</title>
+<style>
+  :root{
+    --bg:#101418; --card:#181f26; --card2:#1e2730; --fg:#e8eef4;
+    --dim:#8fa3b4; --acc:#4aa3ff; --ok:#42d392; --bad:#ff5c5c; --line:#2a3540;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif}
+  .wrap{padding:14px 14px 80px;max-width:720px;margin:0 auto}
+  h1{font-size:17px;margin:2px 0 14px;font-weight:600;letter-spacing:.3px}
+  h1 small{color:var(--dim);font-weight:400;font-size:12px;margin-left:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;margin-bottom:12px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .row + .row{margin-top:10px}
+  .name{font-size:14px;font-weight:600}
+  .sub{font-size:12px;color:var(--dim);margin-top:2px}
+  .install-progress{margin-top:9px;min-width:220px;max-width:360px}
+  .install-progress[hidden]{display:none}
+  .progress-track{height:8px;background:#0b0f13;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .progress-fill{height:100%;width:0;background:linear-gradient(90deg,#3594f5,#42d392);transition:width .25s ease}
+  .progress-caption{font-size:11px;color:var(--dim);margin-top:4px;word-break:break-word}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+    background:#555;margin-right:7px;vertical-align:1px}
+  .dot.ok{background:var(--ok);box-shadow:0 0 6px rgba(66,211,146,.7)}
+  .dot.bad{background:var(--bad);box-shadow:0 0 6px rgba(255,92,92,.6)}
+  .dot.pending{background:#d29922;box-shadow:0 0 6px rgba(210,153,34,.7)}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  button{appearance:none;border:1px solid var(--line);background:var(--card2);
+    color:var(--fg);border-radius:9px;padding:8px 14px;font-size:13px;cursor:pointer}
+  button:active{transform:scale(.97)}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#04121f;font-weight:600}
+  button.danger{background:#3a1e22;border-color:#5a2a30;color:#ff9c9c}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #termOut{background:#0b0f13;border:1px solid var(--line);border-radius:10px;
+    padding:10px;height:300px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,
+    Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:#cfd8e3}
+  .term-bar{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  #termIn{flex:1;min-width:150px;background:#0b0f13;border:1px solid var(--line);
+    color:var(--fg);border-radius:9px;padding:9px 11px;font:13px ui-monospace,
+    Menlo,Consolas,monospace;outline:none}
+  #termIn:focus{border-color:var(--acc)}
+  .hint{font-size:11px;color:var(--dim);margin-top:6px}
+  .term-status{font-size:11px;margin-top:4px;color:var(--dim)}
+  .term-status.ok{color:#3fb950}
+  .term-status.pending{color:#d29922}
+  .term-status.err{color:#f85149}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    background:#22303c;color:var(--fg);border:1px solid var(--line);
+    padding:9px 16px;border-radius:10px;font-size:13px;opacity:0;
+    transition:opacity .2s;pointer-events:none;max-width:86vw;text-align:center;z-index:9}
+  .toast.show{opacity:1}
+  #errBox{display:none;background:#3a1e22;border:1px solid #5a2a30;color:#ffb3b3;
+    border-radius:10px;padding:10px 12px;font-size:12px;margin-bottom:12px;word-break:break-all}
+  #eventBar{font-size:11px;color:var(--dim);border-top:1px solid var(--line);
+    margin-top:14px;padding-top:8px}
+  #eventBar b{color:var(--fg);font-weight:500}
+
+  /* ---- 内嵌终端：固定高度 + 可滑动 ---- */
+  #termWrap{position:relative;margin-top:10px}
+  #xterm{width:100%;height:min(46vh,320px);background:#0b0f13;border-radius:10px;
+    padding:4px;box-sizing:border-box;overflow:hidden}
+  #xterm .xterm,#termPageBody .xterm{height:100%}
+  /* 按行拖拽接管滚动（term-scroll.js），关掉原生像素滚动避免两套机制打架 */
+  .xterm-viewport{overflow:hidden!important;touch-action:none;overscroll-behavior:contain}
+  .xterm-screen{touch-action:none}
+  #termWrap,.term-scrollbtn{touch-action:manipulation}
+  .term-scrollbtn{position:absolute;right:14px;bottom:14px;width:36px;height:36px;border-radius:50%;
+    background:rgba(74,163,255,.92);color:#04121f;border:none;font-size:15px;line-height:1;
+    display:none;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(0,0,0,.45);
+    z-index:5;padding:0}
+  .term-scrollbtn.show{display:flex}
+
+  /* ---- 全屏终端（Termux 风格）---- */
+  #termPage{position:fixed;inset:0;z-index:60;background:#0b0f13;display:none;
+    flex-direction:column;padding-top:env(safe-area-inset-top);
+    padding-bottom:env(safe-area-inset-bottom)}
+  #termPage.show{display:flex}
+  body.term-mode{overflow:hidden}
+  #termPageBar{display:flex;align-items:center;gap:6px;padding:7px 9px;
+    border-bottom:1px solid var(--line);background:#111820}
+  #termPageBar .t{font-size:13px;font-weight:600;flex:1;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  #termPageBar button{padding:6px 10px;font-size:12px;border-radius:8px}
+  #termPageBody{flex:1;min-height:0;position:relative;padding:2px 2px 0}
+  #extraKeys{display:flex;gap:6px;padding:6px 8px;overflow-x:auto;border-top:1px solid var(--line);
+    background:#111820;-webkit-overflow-scrolling:touch;touch-action:pan-x}
+  #extraKeys button{flex:0 0 auto;padding:7px 11px;font-size:12px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;border-radius:8px}
+  #extraKeys button.on{background:var(--acc);border-color:var(--acc);color:#04121f;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>DSH Container Standalone <small id="verTag">v0.9.9</small></h1>
+
+  <div id="errBox"></div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="name"><span id="dotI" class="dot"></span>容器资源</div>
+        <div class="sub" id="subI">查询中…</div>
+        <div class="install-progress" id="installProgress" hidden>
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+          <div class="progress-caption" id="progressCaption">准备中…</div>
+        </div>
+      </div>
+      <div class="btns">
+        <button id="btnRepair">修复文件</button>
+        <button id="btnInstall" class="primary">安装资源</button>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <div class="name"><span id="dotC" class="dot"></span>Ubuntu 容器</div>
+        <div class="sub" id="subC">查询中…</div>
+      </div>
+      <div class="btns">
+        <button id="btnCToggle" class="primary">启动</button>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <div class="name"><span id="dotD" class="dot"></span>DeepSeek Harness</div>
+        <div class="sub" id="subD">查询中…</div>
+      </div>
+      <div class="btns">
+        <button id="btnDToggle" class="primary">启动</button>
+        <button id="btnDOpen">打开浏览器</button>
+        <button id="btnDCopy">复制地址</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div class="name">容器终端</div>
+      <div class="btns">
+        <button id="btnFull">全屏终端</button>
+        <button id="btnClear">清屏</button>
+      </div>
+    </div>
+    <div id="dshLogLine" style="display:none;margin-top:8px;font:11px ui-monospace,Menlo,Consolas,monospace;color:#4aa3ff;background:#0d141c;border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-height:72px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></div>
+    <div id="termWrap">
+      <div id="xterm" style="background:#0b0f13;border-radius:10px"></div>
+      <button id="btnScrollBottom" class="term-scrollbtn" title="回到底部">↓</button>
+    </div>
+    <div id="termStatus" class="term-status">未连接</div>
+    <div class="hint">容器内本地 pty（script + bash）经 WebSocket 直连：支持交互式程序、窗口自适应与滚动回看。点「全屏终端」在同一页面内展开（不重连、不丢输出），带 Esc/Ctrl/方向键快捷栏与长按选词复制。</div>
+  </div>
+
+  <div id="eventBar">最近: <b id="eventText">-</b></div>
+</div>
+<div id="toastBox" class="toast"></div>
+
+<div id="termPage">
+  <div id="termPageBar">
+    <button id="btnPageBack" title="返回">←</button>
+    <div class="t"><span id="termDot" class="dot"></span>容器终端</div>
+    <button id="btnFontMinus">A-</button>
+    <button id="btnFontPlus">A+</button>
+    <button id="btnPageCopy">复制</button>
+    <button id="btnPageText">选择</button>
+    <button id="btnPaste">粘贴</button>
+    <button id="btnPageClear">清屏</button>
+  </div>
+  <div id="termPageBody"></div>
+  <div id="extraKeys"></div>
+</div>
+
+<script src="./xterm.js"></script>
+<script src="./term-scroll.js"></script>
+<script>
+(function () {
+  'use strict';
+  var VERSION = '0.9.9';
+  var MOD = '/data/adb/modules/dsh_container/scripts';
+  // 运行时状态位于 /data/adb/dsh_container（rootfs/cache/run/logs）。
+  var busy = false, pollBusy = false, termBusy = false, d_running_now = false, c_running_now = false, dshStarting = 0;
+  var lastTermText = '', history = [], hIdx = 0, seq = 0;
+
+  function $(id) { return document.getElementById(id); }
+
+  function clog() {
+    try {
+      var args = Array.prototype.slice.call(arguments);
+      args.unshift('[dsh-webui]');
+      console.log.apply(console, args);
+    } catch (e) {}
+  }
+
+  function setEvent(text) {
+    var el = $('eventText');
+    if (el) {
+      var t = new Date();
+      var hh = ('0' + t.getHours()).slice(-2), mm = ('0' + t.getMinutes()).slice(-2), ss = ('0' + t.getSeconds()).slice(-2);
+      el.textContent = hh + ':' + mm + ':' + ss + ' ' + text;
+    }
+  }
+
+  function showErr(msg) {
+    var box = $('errBox');
+    box.style.display = 'block';
+    box.textContent = '⚠ ' + msg;
+    clog('ERROR', msg);
+  }
+
+  function showToast(msg) {
+    var box = $('toastBox');
+    box.textContent = msg;
+    box.classList.add('show');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () { box.classList.remove('show'); }, 2600);
+  }
+
+  window.onerror = function (m, s, l, c, e) {
+    showErr('页面脚本错误: ' + m + ' @' + l + ':' + c);
+    return false;
+  };
+  window.addEventListener('unhandledrejection', function (ev) {
+    showErr('未处理异常: ' + (ev.reason && (ev.reason.message || ev.reason) || 'unknown'));
+  });
+
+  // ---- KernelSU exec 桥（官方同款协议 + 120s 超时） ----
+  function ksuExec(command, options) {
+    options = options || {};
+    return new Promise(function (resolve, reject) {
+      if (typeof ksu === 'undefined' || !ksu || typeof ksu.exec !== 'function') {
+        reject(new Error('KSU 桥不可用: window.ksu.exec 不存在 (typeof ksu=' + (typeof ksu) + ')'));
+        return;
+      }
+      var cbName = 'exec_callback_' + Date.now() + '_' + (seq++);
+      var timer = setTimeout(function () {
+        try { delete window[cbName]; } catch (e) {}
+        clog('TIMEOUT', command);
+        reject(new Error('执行超时(120s): ' + command));
+      }, 120000);
+      window[cbName] = function (errno, stdout, stderr) {
+        clearTimeout(timer);
+        try { delete window[cbName]; } catch (e) {}
+        clog('RESULT', command, 'errno=' + errno);
+        resolve({ errno: errno, stdout: stdout, stderr: stderr });
+      };
+      try {
+        clog('EXEC', command);
+        ksu.exec(command, JSON.stringify(options), cbName);
+      } catch (e) {
+        clearTimeout(timer);
+        try { delete window[cbName]; } catch (e2) {}
+        reject(e);
+      }
+    });
+  }
+
+  function runScript(name, args, extra) {
+    return ksuExec('sh ' + MOD + '/' + name + ' ' + (args || '') + (extra ? ' ' + extra : ''));
+  }
+
+  function runScriptChecked(name, args, extra) {
+    return runScript(name, args, extra).then(function (r) {
+      if (r.errno !== 0) {
+        throw new Error(((r.stderr || r.stdout || ('exit ' + r.errno)) + '').trim());
+      }
+      return r.stdout;
+    });
+  }
+
+  var GATEWAY_URL = 'http://127.0.0.1:__BRIDGE_PORT__';
+  var TERM_WS_PORT = __WS_PORT__;
+
+  function copyFallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; })
+        .catch(function () { return copyFallback(text); });
+    }
+    return Promise.resolve(copyFallback(text));
+  }
+
+  // ---- 状态 ----
+  function setCtlBusy(on, note) {
+    busy = on;
+    ['btnCToggle', 'btnDToggle'].forEach(function (id) {
+      $(id).disabled = on;
+    });
+    if (note) showToast(note);
+  }
+
+  function applyStatus(s) {
+    var c = s.container || {}, d = s.dsh || {};
+    c_running_now = !!c.running;
+    $('dotC').className = 'dot ' + (c.running ? 'ok' : 'bad');
+    $('subC').textContent = c.running ? ('运行中 · pid ' + c.pid) : '已停止';
+    $('btnCToggle').textContent = c.running ? '停止' : '启动';
+    $('btnCToggle').className = c.running ? 'danger' : 'primary';
+    if (d.running) { dshStarting = 0; stopLogPoll(); }
+    var starting = dshStarting && (Date.now() - dshStarting < 180000);
+    $('btnDToggle').textContent = (d.running || starting) ? '停止' : '启动';
+    $('btnDToggle').className = (d.running || starting) ? 'danger' : 'primary';
+    $('dotD').className = 'dot ' + (d.running ? 'ok' : (starting ? '' : 'bad'));
+    $('subD').textContent = d.running
+      ? '运行中 · 入口 http://127.0.0.1:__BRIDGE_PORT__'
+      : (starting ? '启动中…（冷启动约 1 分钟）' : '已停止');
+    d_running_now = !!d.running;
+  }
+
+  var installReady = false;
+  var lastInstallState = 'idle';
+  var installStartedAt = 0;
+
+  function applyInstall(s) {
+    var p = s.progress || {};
+    lastInstallState = p.state || 'idle';
+    var active = p.state === 'running';
+    installReady = !!s.ready;
+    $('dotI').className = 'dot ' + (active ? 'pending' : (s.ready ? 'ok' : 'bad'));
+    var bytes = Number(s.rootfsBytes || 0);
+    var sizeNote = bytes > 0 ? ' · 已占用 ' + (bytes / 1073741824).toFixed(2) + 'GB' : '';
+    var caption = p.message || '';
+
+    if (active) {
+      $('subI').textContent = '资源安装中…' + sizeNote;
+      $('installProgress').hidden = false;
+      $('progressFill').style.width = Math.max(0, Math.min(100, Number(p.percent || 0))) + '%';
+      var elapsed = installStartedAt ? Math.floor((Date.now() - installStartedAt) / 1000) : 0;
+      $('progressCaption').textContent = (p.percent || 0) + '% · ' + (caption || '正在处理') + (elapsed ? ' · 已用时 ' + elapsed + 's' : '');
+      $('btnInstall').textContent = '安装中…';
+      $('btnInstall').disabled = true;
+    } else if (p.state === 'error') {
+      $('subI').textContent = '安装失败' + sizeNote;
+      $('installProgress').hidden = false;
+      $('progressFill').style.width = Math.max(0, Math.min(100, Number(p.percent || 0))) + '%';
+      $('progressFill').style.background = 'var(--bad)';
+      installStartedAt = 0;
+      $('progressCaption').textContent = caption + (p.error ? ' · ' + p.error : '');
+      $('btnInstall').textContent = '重试安装';
+      $('btnInstall').disabled = false;
+    } else if (p.state === 'done') {
+      installStartedAt = 0;
+      $('subI').textContent = '安装完成 · 模块 v' + s.moduleVersion + sizeNote;
+      $('installProgress').hidden = false;
+      $('progressFill').style.width = '100%';
+      $('progressFill').style.background = '';
+      $('progressCaption').textContent = caption || '资源已就绪';
+      $('btnInstall').textContent = s.ready ? '重新安装' : '安装资源';
+      $('btnInstall').disabled = false;
+    } else {
+      installStartedAt = 0;
+      $('subI').textContent = s.ready
+        ? ('已就绪 · 模块 v' + s.moduleVersion + sizeNote)
+        : ('未安装（下载约 111MB；解包后约 1.3GB）' + sizeNote);
+      $('installProgress').hidden = true;
+      $('progressFill').style.background = '';
+      $('btnInstall').textContent = s.ready ? '重新安装' : '安装资源';
+      $('btnInstall').disabled = false;
+    }
+
+    $('btnRepair').disabled = busy || active;
+    $('btnCToggle').disabled = busy || active || !s.ready;
+    $('btnDToggle').disabled = busy || active || !s.ready;
+  }
+
+  function refreshInstall() {
+    return runScriptChecked('install-status.sh', '').then(function (out) {
+      var lines = (out || '').trim().split('\n');
+      applyInstall(JSON.parse(lines[lines.length - 1]));
+    }).catch(function (e) {
+      $('dotI').className = 'dot bad';
+      $('subI').textContent = '无法查询: ' + (e.message || e);
+      if ($('installProgress')) $('installProgress').hidden = true;
+    });
+  }
+
+  function refreshStatus() {
+    if (busy || pollBusy || document.hidden) return;
+    pollBusy = true;
+    runScriptChecked('container.sh', 'status').then(function (out) {
+      var lines = (out || '').trim().split('\n');
+      applyStatus(JSON.parse(lines[lines.length - 1]));
+    }).catch(function (e) {
+      $('dotC').className = 'dot bad';
+      $('subC').textContent = '无法查询: ' + (e.message || e);
+    }).then(function () { pollBusy = false; });
+  }
+
+  var waitTimer = null;
+  function startWaitTick(label) {
+    var t0 = Date.now();
+    stopWaitTick();
+    waitTimer = setInterval(function () {
+      var s = Math.round((Date.now() - t0) / 1000);
+      setEvent(label + ' 执行中… ' + s + 's');
+    }, 5000);
+  }
+  function stopWaitTick() {
+    if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+  }
+
+  function runAction(label, fn, okMsg) {
+    if (busy) return;
+    setCtlBusy(true, '执行中…');
+    setEvent(label + '…');
+    termAppend('$ [控制台] ' + label + ' …');
+    startWaitTick(label);
+    fn().then(function (out) {
+      stopWaitTick();
+      if (out && out.trim()) termAppend('[输出] ' + out.trim());
+      termAppend('$ [控制台] ' + okMsg);
+      showToast(okMsg);
+      setEvent(okMsg);
+    }).catch(function (e) {
+      stopWaitTick();
+      var msg = (e && (e.message || e)) || '未知错误';
+      termAppend('[错误] ' + msg);
+      showToast('失败: ' + msg);
+      var hint = /bundled (curl|zstd|proot)|missing or unusable/.test(msg)
+        ? '\n\n提示: 启动器文件可能缺少执行位，可点“修复文件”后重试。'
+        : '';
+      showErr(label + ' 失败: ' + msg + hint);
+      setEvent('失败: ' + msg);
+    }).then(function () {
+      setCtlBusy(false);
+      refreshStatus();
+    });
+  }
+
+  // ---- 终端 ----
+  var dshLogBuf = [];
+  function termAppend(text) {
+    // 写入终端外的独立日志行（避免与 shell 光标模型冲突）
+    var el = document.getElementById('dshLogLine');
+    if (!el) return;
+    el.style.display = 'block';
+    dshLogBuf.push(text);
+    if (dshLogBuf.length > 6) dshLogBuf = dshLogBuf.slice(-6);
+    el.textContent = dshLogBuf.join('\n');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function b64utf8(str) {
+    var bytes = new TextEncoder().encode(str), bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  // ---- 真终端（xterm + 容器内 pty over WebSocket）----
+  // 由容器内 ssh-term.js 提供：本地 pty（script + bash），无轮询、支持交互式程序与 resize。
+  var term = null, termWs = null, termWsTimer = null, termRetry = 0;
+  var termFontSize = 12, ctrlSticky = false, altSticky = false;
+  var lastSentSize = '', fitTimer = null, termScroller = null, termSel = null;
+
+  function termStatus(text, cls) {
+    var el = document.getElementById('termStatus');
+    if (el) { el.textContent = text; el.className = 'term-status' + (cls ? ' ' + cls : ''); }
+    var dot = document.getElementById('termDot');
+    if (dot) dot.className = 'dot ' + (cls === 'ok' ? 'ok' : (cls === 'err' ? 'bad' : (cls === 'pending' ? 'pending' : '')));
+  }
+
+  function initTerm() {
+    if (typeof Terminal === 'undefined') { showErr('xterm.js 未加载'); return; }
+    term = new Terminal({
+      fontSize: termFontSize,
+      cursorBlink: true,
+      scrollback: 8000,
+      scrollOnUserInput: true,
+      scrollSensitivity: 1,
+      fastScrollSensitivity: 5,
+      smoothScrollDuration: 90,
+      fontFamily: 'ui-monospace, Menlo, Consolas, "Noto Sans Mono", monospace',
+      lineHeight: 1.15,
+      theme: {
+        background: '#0b0f13', foreground: '#cfd8e3',
+        cursor: '#4aa3ff', selection: 'rgba(74,163,255,.30)'
+      }
+    });
+    term.open(document.getElementById('xterm'));
+    // 长按选词 + 系统复制视图挂在全屏浮层里（浮层是 fixed inset:0，等同整页）
+    if (typeof attachTermSelection === 'function') {
+      termSel = attachTermSelection(term, { host: document.getElementById('termPageBody') });
+    }
+    // 按行拖拽滚动 + 惯性（Termux 手感）；卡片内的终端不显示位置指示条
+    termScroller = (typeof attachTouchScroll === 'function')
+      ? attachTouchScroll(term, { indicator: null, selection: termSel ? termSel.ctl : null })
+      : null;
+    term.onData(function (data) { sendInput(data); });
+    term.onResize(function (size) {
+      // 只上报真正变化的尺寸：布局稳定过程中会连着发好几次，每次都 stty 一次没必要
+      var key = size.cols + 'x' + size.rows;
+      if (key === lastSentSize) return;
+      lastSentSize = key;
+      if (termWs && termWs.readyState === 1) {
+        termWs.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+      }
+    });
+    // 向上回看时显示“回到底部”；xterm 自己会保留视口，不会因为新输出把用户拉回底部
+    term.onScroll(function () {
+      var buf = term.buffer.active;
+      var btn = document.getElementById('btnScrollBottom');
+      if (btn) btn.classList.toggle('show', buf.viewportY < buf.baseY);
+    });
+    term.attachCustomKeyEventHandler(function (ev) {
+      if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
+        var sel = term.getSelection();
+        if (sel) { copyText(sel); term.clearSelection(); return false; }
+      }
+      return true;
+    });
+    fitTerm();
+    termConnect();
+  }
+
+  // ---- 终端端点（端口 + token）----
+  // ssh-term.js 启动时把真实端口和一次性 token 写进 rootfs 里的 ws.endpoint（mode 0600）。
+  // 页面拿不到就回退到编译期的默认端口（此时服务端会 401，终端不可用但不会假连）。
+  var WS_ENDPOINT_HOST = '/data/adb/dsh_container/rootfs/root/.dsh-container/ws.endpoint';
+  var wsEndpoint = { port: TERM_WS_PORT, token: '' };
+  var wsEndpointLoaded = false;
+
+  function parseEndpoint(text) {
+    var o = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var m = /^([A-Za-z_]+)=(.*)$/.exec(line.trim());
+      if (m) o[m[1]] = m[2];
+    });
+    return o;
+  }
+
+  function loadWsEndpoint(force) {
+    if (wsEndpointLoaded && !force) return Promise.resolve(wsEndpoint);
+    if (!force) {
+      try {
+        var c = JSON.parse(localStorage.getItem('dsh-ws-endpoint') || 'null');
+        if (c && c.port && c.token) {
+          wsEndpoint = { port: c.port, token: c.token };
+          wsEndpointLoaded = true;
+          return Promise.resolve(wsEndpoint);
+        }
+      } catch (e) {}
+    }
+    return ksuExec('cat ' + WS_ENDPOINT_HOST + ' 2>/dev/null').then(function (r) {
+      var o = parseEndpoint(r && r.stdout);
+      if (o.port && o.token) {
+        wsEndpoint = { port: parseInt(o.port, 10) || TERM_WS_PORT, token: o.token };
+        wsEndpointLoaded = true;
+        try { localStorage.setItem('dsh-ws-endpoint', JSON.stringify(wsEndpoint)); } catch (e) {}
+        clog('ws endpoint', wsEndpoint.port);
+      }
+      return wsEndpoint;
+    }).catch(function () { return wsEndpoint; });
+  }
+
+  function forgetWsEndpoint() {
+    wsEndpointLoaded = false;
+    wsEndpoint = { port: TERM_WS_PORT, token: '' };
+    try { localStorage.removeItem('dsh-ws-endpoint'); } catch (e) {}
+  }
+
+  function termConnect() {
+    if (termWs && (termWs.readyState === 0 || termWs.readyState === 1)) return;
+    termStatus('连接中…', 'pending');
+    loadWsEndpoint().then(openTermSocket);
+  }
+
+  function openTermSocket() {
+    var ws;
+    try {
+      ws = new WebSocket('ws://127.0.0.1:' + wsEndpoint.port + '/?token=' + encodeURIComponent(wsEndpoint.token));
+    } catch (e) {
+      termStatus('无法建立 WebSocket', 'err');
+      return;
+    }
+    var opened = false;
+    ws.binaryType = 'arraybuffer';
+    termWs = ws;
+
+    ws.onopen = function () {
+      opened = true;
+      termRetry = 0;
+      termStatus('已连接', 'ok');
+      if (term) { try { term.focus(); } catch (e) {} }
+      // 立即同步一次尺寸，避免首屏换行错位
+      if (term) {
+        lastSentSize = '';
+        try { ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); } catch (e) {}
+      }
+    };
+    ws.onmessage = function (ev) {
+      if (!term) return;
+      if (typeof ev.data === 'string') { term.write(ev.data); return; }
+      term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = function () {
+      termWs = null;
+      // 从未连上就断开：大概率是 token 过期/端点文件被重建，下次重连前重新读一次
+      if (!opened) forgetWsEndpoint();
+      termStatus('已断开，重试中…', 'pending');
+      // 退避重连：终端服务可能尚未就绪
+      termRetry = Math.min(termRetry + 1, 6);
+      var delay = Math.min(500 * termRetry, 3000);
+      clearTimeout(termWsTimer);
+      termWsTimer = setTimeout(termConnect, delay);
+    };
+    ws.onerror = function () {
+      termStatus('连接错误', 'err');
+    };
+  }
+
+  function termWrite(text) {
+    if (term) term.write('\r\n' + text + '\r\n');
+  }
+
+  // ---- 尺寸自适应 ----
+  // xterm.js 核心不自带 fit：容器尺寸变化后必须自己算 cols/rows，否则内容被裁切，
+  // 滚动条也与实际内容对不上（之前“滑动别扭”的主要原因）。
+  function termCellSize() {
+    var fs = termFontSize, ff = 'monospace', lh = 1.15;
+    try {
+      if (term && term.options) {
+        if (term.options.fontSize) fs = term.options.fontSize;
+        if (term.options.fontFamily) ff = term.options.fontFamily;
+        if (term.options.lineHeight) lh = term.options.lineHeight;
+      }
+    } catch (e) {}
+    try {
+      var d = term._core._renderService.dimensions;
+      if (d && d.css && d.css.cell && d.css.cell.width > 0 && d.css.cell.height > 0) {
+        return { w: d.css.cell.width, h: d.css.cell.height };
+      }
+    } catch (e) {}
+    var span = document.createElement('span');
+    span.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre;' +
+      'font-family:' + ff + ';font-size:' + fs + 'px;line-height:' + lh;
+    span.textContent = 'W'.repeat(32);
+    document.body.appendChild(span);
+    var w = span.getBoundingClientRect().width / 32;
+    document.body.removeChild(span);
+    return { w: w || fs * 0.6, h: Math.ceil(fs * lh) };
+  }
+
+  function fitTerm() {
+    if (!term || !term.element) return;
+    var host = term.element.parentElement;
+    if (!host) return;
+    var w = host.clientWidth, h = host.clientHeight;
+    if (w < 24 || h < 24) return;
+    var cell = termCellSize();
+    var cols = Math.max(20, Math.floor((w - 4) / cell.w));
+    var rows = Math.max(4, Math.floor((h - 4) / cell.h));
+    if (cols !== term.cols || rows !== term.rows) {
+      try { term.resize(cols, rows); } catch (e) { clog('resize failed', e.message); }
+    }
+  }
+
+  function scheduleFit(delay) {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(fitTerm, delay || 180);
+  }
+
+  function watchViewport() {
+    var refit = function () { scheduleFit(180); };
+    window.addEventListener('resize', refit);
+    window.addEventListener('orientationchange', function () { setTimeout(fitTerm, 320); });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', refit);
+      window.visualViewport.addEventListener('scroll', refit);
+    }
+  }
+
+  // ---- 输入 ----
+  function sendInput(data) {
+    if (!data) return;
+    if (ctrlSticky) {
+      ctrlSticky = false; syncModKeys();
+      if (data.length === 1) {
+        var c = data.toUpperCase().charCodeAt(0);
+        if (c >= 64 && c <= 95) data = String.fromCharCode(c - 64);
+      }
+    }
+    if (altSticky) {
+      altSticky = false; syncModKeys();
+      data = '\x1b' + data;
+    }
+    if (termWs && termWs.readyState === 1) {
+      termWs.send(JSON.stringify({ type: 'stdin', data: b64utf8(data) }));
+    }
+  }
+
+  // ---- 全屏终端页面（Termux 风格）----
+  var EXTRA_KEYS = [
+    ['ESC', '\x1b'], ['TAB', '\t'], ['CTRL', '@ctrl'], ['ALT', '@alt'],
+    ['←', '\x1b[D'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['→', '\x1b[C'],
+    ['HOME', '\x1b[H'], ['END', '\x1b[F'], ['PGUP', '\x1b[5~'], ['PGDN', '\x1b[6~'],
+    ['/', '/'], ['-', '-'], ['|', '|'], ['~', '~']
+  ];
+
+  function buildExtraKeys() {
+    var bar = document.getElementById('extraKeys');
+    if (!bar || bar.getAttribute('data-built')) return;
+    bar.setAttribute('data-built', '1');
+    EXTRA_KEYS.forEach(function (k) {
+      var b = document.createElement('button');
+      b.textContent = k[0];
+      if (k[1] === '@ctrl') b.id = 'keyCtrl';
+      if (k[1] === '@alt') b.id = 'keyAlt';
+      b.onclick = function (ev) {
+        ev.preventDefault();
+        if (k[1] === '@ctrl') { ctrlSticky = !ctrlSticky; syncModKeys(); if (term) term.focus(); return; }
+        if (k[1] === '@alt') { altSticky = !altSticky; syncModKeys(); if (term) term.focus(); return; }
+        sendInput(k[1]);
+        if (term) term.focus();
+      };
+      bar.appendChild(b);
+    });
+  }
+
+  function syncModKeys() {
+    var c = document.getElementById('keyCtrl'), a = document.getElementById('keyAlt');
+    if (c) c.classList.toggle('on', ctrlSticky);
+    if (a) a.classList.toggle('on', altSticky);
+  }
+
+  function termPageOpen(on) {
+    var page = document.getElementById('termPage');
+    var host = document.getElementById(on ? 'termPageBody' : 'xterm');
+    if (!page || !host || !term || !term.element) return;
+    page.classList.toggle('show', !!on);
+    document.body.classList.toggle('term-mode', !!on);
+    // 同一个 xterm 实例在两个宿主之间搬移：保留滚动位置与 shell 会话，不重开连接
+    host.appendChild(term.element);
+    try { history.replaceState(null, '', on ? '?page=terminal' : location.pathname); } catch (e) {}
+    setTimeout(function () {
+      fitTerm();
+      try { term.refresh(0, term.rows - 1); } catch (e) {}
+      if (on && term) term.focus();
+      scheduleFit(240);
+    }, 60);
+  }
+
+  function applyRoute() {
+    var p = (location.search || '') + (location.hash || '');
+    if (/page=terminal|#terminal/.test(p)) termPageOpen(true);
+  }
+
+  function setFontSize(delta) {
+    termFontSize = Math.max(8, Math.min(22, termFontSize + delta));
+    if (term) {
+      try { term.options.fontSize = termFontSize; } catch (e) {}
+      fitTerm();
+      showToast('字号 ' + termFontSize + 'px');
+    }
+  }
+
+  // ---- 绑定 ----
+  $('btnRepair').onclick = function () {
+    runAction('修复模块文件', function () {
+      return runScriptChecked('repair.sh', '');
+    }, '文件检查完成');
+  };
+  $('btnInstall').onclick = function () {
+    if (busy || lastInstallState === 'running') { showToast('安装正在进行，请等待当前任务结束'); return; }
+    if (installReady && !confirm('资源已存在，重新安装会重新下载并替换 rootfs，继续？')) return;
+    installStartedAt = Date.now();
+    showToast('安装开始，进度会显示在“容器资源”下方');
+    setEvent('安装容器资源已开始');
+    // A full install outlives the exec bridge's 120s ceiling, so the script detaches and
+    // the page tracks it through install-status.sh instead of blocking on one call.
+    runAction('安装容器资源', function () {
+      return runScriptChecked('container.sh', 'install', '--detach').then(function (out) {
+        installPollUntilDone();
+        return out;
+      });
+    }, '安装已在后台开始');
+  };
+
+  var installPollTimer = null;
+  function installPollUntilDone() {
+    if (installPollTimer) return;
+    refreshInstall(); // Publish the starting stage immediately.
+    installPollTimer = setInterval(function () {
+      refreshInstall().then(function () {
+        if (installPollTimer && lastInstallState !== 'running') {
+          clearInterval(installPollTimer);
+          installPollTimer = null;
+          refreshStatus();
+        }
+      });
+    }, 2000);
+  }
+  $('btnCToggle').onclick = function () {
+    if (c_running_now) {
+      runAction('停止容器', function () { return runScriptChecked('container.sh', 'stop'); }, '容器已停止');
+    } else {
+      runAction('启动容器', function () { return runScriptChecked('container.sh', 'start'); }, '容器已启动');
+    }
+  };
+  var logTimer = null, lastLogLines = [];
+  function stopLogPoll() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
+  function pollDshLog() {
+    if (!dshStarting) { stopLogPoll(); return; }
+    runScriptChecked('dsh.sh', 'log').then(function (out) {
+      if (!out || !out.trim()) return;
+      var lines = out.trim().split('\n');
+      var newLines = [];
+      if (lastLogLines.length === 0) {
+        newLines = lines;
+      } else {
+        var lastShown = lastLogLines[lastLogLines.length - 1];
+        var idx = lines.lastIndexOf(lastShown);
+        if (idx >= 0 && idx < lines.length - 1) newLines = lines.slice(idx + 1);
+        else if (idx < 0) newLines = lines;
+      }
+      if (newLines.length > 0) {
+        termAppend('[dsh] ' + newLines.join('\r\n[dsh] '));
+        lastLogLines = lines;
+      }
+    }).catch(function () {});
+  }
+  $('btnDToggle').onclick = function () {
+    var starting = dshStarting && (Date.now() - dshStarting < 180000);
+    if (d_running_now || starting) {
+      runAction('停止 DSH', function () {
+        dshStarting = 0; stopLogPoll();
+        return runScriptChecked('dsh.sh', 'stop');
+      }, 'DSH 已停止');
+    } else {
+      runAction('启动 DSH', function () {
+        dshStarting = Date.now();
+        lastLogLines = [];
+        if (!logTimer) logTimer = setInterval(pollDshLog, 2000);
+        return runScriptChecked('dsh.sh', 'start');
+      }, 'DSH 启动中…（约 1 分钟）');
+    }
+  };
+  $('btnDOpen').onclick = function () {
+    if (!d_running_now) { showToast('DSH 未运行，先点「启动」'); return; }
+    setEvent('跳转浏览器…');
+    ksuExec('am start -a android.intent.action.VIEW -d "' + GATEWAY_URL + '"').then(function (r) {
+      if (r.errno === 0) {
+        showToast('已在浏览器打开 ' + GATEWAY_URL);
+        setEvent('浏览器已打开 ' + GATEWAY_URL);
+      } else {
+        throw new Error((r.stderr || 'am start 失败').trim());
+      }
+    }).catch(function (e) {
+      showToast('跳转失败: ' + (e.message || e) + '（可手动访问 ' + GATEWAY_URL + '）');
+      setEvent('跳转失败');
+    });
+  };
+  $('btnDCopy').onclick = function () {
+    copyText(GATEWAY_URL).then(function (ok) {
+      showToast(ok ? '已复制: ' + GATEWAY_URL : '复制失败，地址: ' + GATEWAY_URL);
+    });
+  };
+
+
+  $('btnClear').onclick = function () {
+    if (term) term.clear();
+    showToast('已清屏');
+  };
+  $('btnPageClear').onclick = function () {
+    if (term) term.clear();
+  };
+  $('btnPageCopy').onclick = function () {
+    if (!termSel) { showToast('当前环境不支持选区复制'); return; }
+    var t = '';
+    try { t = term.getSelection(); } catch (e) {}
+    if (t) termSel.copySelection(); else termSel.copyAll();
+  };
+  $('btnPageText').onclick = function () {
+    if (termSel) termSel.showTextView();
+    else showToast('当前环境不支持选择视图');
+  };
+  $('btnFull').onclick = function () {
+    // 同文档全屏：只把同一个 xterm 实例搬进浮层，不重连、不重载、输出不丢
+    termPageOpen(true);
+  };
+  $('btnPageBack').onclick = function () { termPageOpen(false); };
+  $('btnFontMinus').onclick = function () { setFontSize(-1); };
+  $('btnFontPlus').onclick = function () { setFontSize(1); };
+  $('btnScrollBottom').onclick = function () {
+    if (term) { term.scrollToBottom(); term.focus(); }
+    this.classList.remove('show');
+  };
+  $('btnPaste').onclick = function () {
+    var finish = function (txt) {
+      if (txt) { sendInput(txt); showToast('已粘贴 ' + txt.length + ' 字'); }
+      if (term) term.focus();
+    };
+    var ask = function () {
+      var t = window.prompt('此环境不允许读剪贴板，请把内容粘贴到下面：', '');
+      if (t) finish(t);
+    };
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(finish).catch(ask);
+      return;
+    }
+    ask();
+  };
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && document.body.classList.contains('term-mode')) {
+      ev.preventDefault();
+      termPageOpen(false);
+    }
+  });
+
+  // ---- 初始化 ----
+  function init() {
+    clog('page v' + VERSION + ' boot');
+    if (typeof ksu === 'undefined') {
+      showErr('KSU 桥未注入（window.ksu 不存在）。请确认从 KernelSU 管理器打开本页面。');
+      setEvent('KSU 桥缺失');
+      return;
+    }
+    showToast('页面已就绪 v' + VERSION);
+    setEvent('已加载 v' + VERSION);
+    initTerm();
+    buildExtraKeys();
+    watchViewport();
+    applyRoute();
+    // 浏览器网络能力自检（判断能否用 WebSocket 直连本地）
+    try {
+      fetch('http://127.0.0.1:__BRIDGE_PORT__/', { method: 'HEAD', mode: 'no-cors' })
+        .then(function () { setEvent('浏览器直连 OK → 可用 WebSocket 实时终端'); })
+        .catch(function () { setEvent('浏览器直连受限（混合内容）→ 终端走轮询模式'); });
+    } catch (e) {
+      setEvent('直连测试异常: ' + e.message);
+    }
+    refreshInstall().then(function () {
+      if (lastInstallState === 'running') installPollUntilDone();
+      refreshStatus();
+    });
+    setInterval(function () { refreshInstall().then(refreshStatus); }, 10000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>

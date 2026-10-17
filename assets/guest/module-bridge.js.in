@@ -1,0 +1,118 @@
+// module-bridge.js — authorization bridge for the container's DSH web profile.
+// Extracts the one-time token from the DSH startup log, performs the server-side
+// authorize exchange, and forwards browser requests with the resulting cookie.
+// Listens on loopback only.
+const http = require('http');
+const net = require('net');
+const fs = require('fs');
+
+const LISTEN_PORT = @BRIDGE_PORT@;
+const DSH_PORT = @DSH_PORT@;
+const DSH_HOST = '127.0.0.1:' + DSH_PORT;
+const DSH_LOG = '/root/.dsh-container/dsh.log';
+const TOKEN_RE = /http:\/\/127\.0\.0\.1:@DSH_PORT@\/\?token=[A-Za-z0-9._~-]{8,}/g;
+const COOKIE_TTL = 29 * 24 * 60 * 60 * 1000;
+
+let session = { cookie: undefined, at: 0 };
+
+function findTokenUrl() {
+  try {
+    const log = fs.readFileSync(DSH_LOG, 'utf8');
+    const all = log.match(TOKEN_RE);
+    return all ? all[all.length - 1] : undefined;
+  } catch (e) { return undefined; }
+}
+
+async function authorize() {
+  if (session.cookie && (Date.now() - session.at) < COOKIE_TTL) return session.cookie;
+  const url = findTokenUrl();
+  if (!url) return undefined;
+  try {
+    const res = await fetch(url, { redirect: 'manual' });
+    const sc = res.headers.get('set-cookie');
+    if (sc) {
+      session = { cookie: sc.split(';')[0], at: Date.now() };
+      console.log('[bridge] authorized');
+      return session.cookie;
+    }
+  } catch (e) { console.log('[bridge] authorize fail:', e.message); }
+  return undefined;
+}
+
+function buildHeaders(req, cookie) {
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    const key = k.toLowerCase();
+    if (key === 'host') continue;
+    if (key === 'origin') { headers[k] = 'http://' + DSH_HOST; continue; }
+    if (key === 'referer') { headers[k] = 'http://' + DSH_HOST + '/'; continue; }
+    if (key === 'sec-fetch-site') { headers[k] = 'same-origin'; continue; }
+    headers[k] = v;
+  }
+  headers['host'] = DSH_HOST;
+  if (cookie) headers['cookie'] = cookie;
+  return headers;
+}
+
+function proxyOnce(req, res, cookie, retried) {
+  const up = http.request(
+    { hostname: '127.0.0.1', port: DSH_PORT, path: req.url, method: req.method, headers: buildHeaders(req, cookie) },
+    (ur) => {
+      if (ur.statusCode === 401 && !retried) {
+        session = { cookie: undefined, at: 0 };
+        authorize().then((c) => { proxyOnce(req, res, c, true); });
+        ur.resume();
+        return;
+      }
+      res.writeHead(ur.statusCode, ur.headers);
+      ur.pipe(res);
+    });
+  up.on('error', (e) => {
+    try {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('bridge: dsh upstream unreachable (' + (e.code || e.message) + ')');
+    } catch (_) {}
+  });
+  req.pipe(up);
+}
+
+const server = http.createServer(async (req, res) => {
+  const cookie = await authorize();
+  proxyOnce(req, res, cookie, false);
+});
+
+server.on('upgrade', async (req, socket, head) => {
+  const cookie = await authorize();
+  const up = net.connect(DSH_PORT, '127.0.0.1', () => {
+    const lines = [req.method + ' ' + req.url + ' HTTP/1.1', 'Host: ' + DSH_HOST];
+    for (const [k, v] of Object.entries(req.headers)) {
+      const key = k.toLowerCase();
+      if (key === 'host') continue;
+      if (key === 'origin') { lines.push('Origin: http://' + DSH_HOST); continue; }
+      if (key === 'sec-fetch-site') { lines.push('Sec-Fetch-Site: same-origin'); continue; }
+      if (key === 'referer') { lines.push('Referer: http://' + DSH_HOST + '/'); continue; }
+      if (key === 'connection' || key === 'upgrade') continue;
+      lines.push(k + ': ' + v);
+    }
+    if (cookie) lines.push('Cookie: ' + cookie);
+    lines.push('Connection: Upgrade', 'Upgrade: websocket');
+    up.write(lines.join('\r\n') + '\r\n\r\n');
+    if (head && head.length) up.write(head);
+    up.pipe(socket); socket.pipe(up);
+  });
+  up.on('error', () => { try { socket.destroy(); } catch (_) {} });
+  socket.on('error', () => { try { up.destroy(); } catch (_) {} });
+});
+
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    console.log('[module-bridge] port ' + LISTEN_PORT + ' already in use; exiting cleanly');
+    process.exit(0);
+  }
+  throw e;
+});
+
+server.listen(LISTEN_PORT, '127.0.0.1', () => {
+  console.log('[module-bridge] listening 127.0.0.1:' + LISTEN_PORT + ' -> ' + DSH_HOST);
+  setTimeout(() => { authorize().then((c) => { if (c) console.log('[bridge] pre-authorized'); }).catch(() => {}); }, 800);
+});
